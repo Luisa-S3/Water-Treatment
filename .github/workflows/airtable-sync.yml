@@ -1,0 +1,54 @@
+name: Sync PR to Airtable
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, ready_for_review, closed]
+    branches:
+      - main  # ejecuta solo si el PR va dirigido a main
+
+jobs:
+  airtable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Prepare PR data
+        env:
+          PR_JSON: ${{ toJson(github.event.pull_request) }}
+        run: |
+          echo "$PR_JSON" | jq -r '
+            {
+              "fields": {
+                "task":        .title,
+                "program":     .head.ref,
+                "description": .body,
+                "id pull":     (.number | tostring),
+                "author":      .user.login,
+                "date":        .created_at,
+                "link":        .html_url,
+                "PR status":   (if .merged then "merged" else .state end)
+              }
+            }' > payload.json
+
+      - name: Upsert to Airtable
+        env:
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TABLE_ID: ${{ secrets.AIRTABLE_TABLE_ID }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          RECORD_ID=$(curl -s -G \
+            -H "Authorization: Bearer $AIRTABLE_TOKEN" \
+            --data-urlencode "filterByFormula={id pull}='$PR_NUMBER'" \
+            "https://api.airtable.com/v0/$AIRTABLE_BASE_ID/$AIRTABLE_TABLE_ID" \
+            | jq -r '.records[0].id // empty')
+
+          METHOD="POST"; URL="https://api.airtable.com/v0/$AIRTABLE_BASE_ID/$AIRTABLE_TABLE_ID"
+          [ -n "$RECORD_ID" ] && METHOD="PATCH" && URL="$URL/$RECORD_ID"
+
+          curl -s -X $METHOD "$URL" \
+               -H "Authorization: Bearer $AIRTABLE_TOKEN" \
+               -H "Content-Type: application/json" \
+               --data @payload.json
+
