@@ -25,7 +25,7 @@ jobs:
                 "description": .body,
                 "id pull":     .number,
                 "author":      .user.login,
-                "date":        .created_at,
+                "date":        .created_at | split("T")[0]),
                 "link":        .html_url,
                 "PR status":   (if .merged then "merged" else .state end)
               }
