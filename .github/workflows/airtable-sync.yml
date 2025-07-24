@@ -23,7 +23,7 @@ jobs:
                 "task":        .title,
                 "program":     .head.ref,
                 "description": .body,
-                "id pull":     (.number | tostring),
+                "id pull":     .number,
                 "author":      .user.login,
                 "date":        .created_at,
                 "link":        .html_url,
