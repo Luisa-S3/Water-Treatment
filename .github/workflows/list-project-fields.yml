@@ -23,9 +23,25 @@ jobs:
                     title
                     fields(first: 50) {
                       nodes {
+                      __typename
+                      ... on ProjectV2FieldCommon {
                         id
                         name
+                        }
+                        ... on ProjectV2SingleSelectField {
                         dataType
+                        }
+                        ... on ProjectV2TextField {
+                        dataType
+                        }
+                        ... on ProjectV2NumberField {
+                        dataType
+                        }
+                          ... on ProjectV2DateField {
+                        dataType
+                        ... on ProjectVIterationField {
+                        dataType
+                        }
                       }
                     }
                   }
