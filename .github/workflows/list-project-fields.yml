@@ -28,18 +28,18 @@ jobs:
                         id
                         name
                         }
-                        ... on ProjectV2SingleSelectField {
+                      ... on ProjectV2SingleSelectField {
                         dataType
                         }
-                        ... on ProjectV2TextField {
+                      ... on ProjectV2TextField {
                         dataType
                         }
-                        ... on ProjectV2NumberField {
+                      ... on ProjectV2NumberField {
                         dataType
                         }
-                          ... on ProjectV2DateField {
+                      ... on ProjectV2DateField {
                         dataType
-                        ... on ProjectVIterationField {
+                      ... on ProjectVIterationField {
                         dataType
                         }
                       }
