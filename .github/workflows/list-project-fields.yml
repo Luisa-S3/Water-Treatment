@@ -1,9 +1,7 @@
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  projects: read
+permissions:{}
 
 jobs:
   list-fields:
