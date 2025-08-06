@@ -3,7 +3,7 @@ on:
 
 permissions:
   contents: read
-  project: read
+  projects: read
 
 jobs:
   list-fields:
