@@ -1,0 +1,46 @@
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  project: read
+
+jobs:
+  list-fields:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List fields in user project
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PROJECT_TOKEN }}
+          script: |
+            const username = "TU_USUARIO"; // <- Cámbialo por tu nombre de usuario
+            const projectNumber = 1;       // <- Cámbialo por el número que aparece en la URL
+
+            const result = await github.graphql(`
+              query($login: String!, $number: Int!) {
+                user(login: $login) {
+                  projectV2(number: $number) {
+                    id
+                    title
+                    fields(first: 50) {
+                      nodes {
+                        id
+                        name
+                        dataType
+                      }
+                    }
+                  }
+                }
+              }
+            `, {
+              login: username,
+              number: projectNumber
+            });
+
+            console.log("📌 Project title:", result.user.projectV2.title);
+            console.log("🆔 Project ID:", result.user.projectV2.id);
+            console.log("📋 Campos:");
+            for (const field of result.user.projectV2.fields.nodes) {
+              console.log(`➡️  ${field.name} | ID: ${field.id} | Tipo: ${field.dataType}`);
+            }
