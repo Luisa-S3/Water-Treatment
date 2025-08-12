@@ -1,7 +1,7 @@
 name: list project fields
-on: 
- workflow_dispatch:
 
+on:
+  workflow_dispatch:
 
 jobs:
   list-fields:
@@ -12,10 +12,10 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PROJECT_TOKEN }}
           script: |
-            const username = "Luisa-S3"; // <- Cámbialo por tu nombre de usuario
-            const projectNumber = 1;       // <- Cámbialo por el número que aparece en la URL
+            const username = "Luisa-S3"; // <- cámbialo si aplica
+            const projectNumber = 1;     // <- cámbialo por el número de la URL (ProjectV2)
 
-            const result = await github.graphql(`
+            const query = `
               query($login: String!, $number: Int!) {
                 user(login: $login) {
                   projectV2(number: $number) {
@@ -23,38 +23,62 @@ jobs:
                     title
                     fields(first: 50) {
                       nodes {
-                      __typename
-                      ... on ProjectV2FieldCommon {
-                        id
-                        name
+                        __typename
+                        ... on ProjectV2FieldCommon {
+                          id
+                          name
                         }
-                      ... on ProjectV2SingleSelectField {
-                        dataType
+                        ... on ProjectV2SingleSelectField {
+                          dataType
+                          options(first: 100) {
+                            nodes { id name }
+                          }
                         }
-                      ... on ProjectV2TextField {
-                        dataType
+                        ... on ProjectV2TextField {
+                          dataType
                         }
-                      ... on ProjectV2NumberField {
-                        dataType
+                        ... on ProjectV2NumberField {
+                          dataType
                         }
-                      ... on ProjectV2DateField {
-                        dataType
-                      ... on ProjectVIterationField {
-                        dataType
+                        ... on ProjectV2DateField {
+                          dataType
+                        }
+                        ... on ProjectV2IterationField {
+                          dataType
                         }
                       }
                     }
                   }
                 }
               }
-            `, {
+            `;
+
+            const result = await github.graphql(query, {
               login: username,
               number: projectNumber
             });
 
-            console.log("📌 Project title:", result.user.projectV2.title);
-            console.log("🆔 Project ID:", result.user.projectV2.id);
+            const proj = result.user?.projectV2;
+            if (!proj) {
+              core.setFailed("No se encontró el proyecto. Verifica login/number y el scope del token (project read).");
+              return;
+            }
+
+            console.log("📌 Project title:", proj.title);
+            console.log("🆔 Project ID:", proj.id);
             console.log("📋 Campos:");
-            for (const field of result.user.projectV2.fields.nodes) {
-              console.log(`➡️  ${field.name} | ID: ${field.id} | Tipo: ${field.dataType}`);
+
+            for (const field of proj.fields.nodes) {
+              const name = field.name ?? "(sin nombre)";
+              const id = field.id ?? "(sin id)";
+              const type = field.__typename ?? "(desconocido)";
+              const dt = field.dataType ?? "(n/a)";
+              console.log(`➡️  ${name} | ID: ${id} | __typename: ${type} | dataType: ${dt}`);
+
+              // Si es SingleSelect, lista opciones
+              if (type === "ProjectV2SingleSelectField" && field.options?.nodes?.length) {
+                for (const opt of field.options.nodes) {
+                  console.log(`    - opción: ${opt.name} (${opt.id})`);
+                }
+              }
             }
