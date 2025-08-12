@@ -12,8 +12,8 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PROJECT_TOKEN }}
           script: |
-            const username = "Luisa-S3"; // <- cámbialo si aplica
-            const projectNumber = 1;     // <- cámbialo por el número de la URL (ProjectV2)
+            const username = "Luisa-S3"; // cámbialo si aplica
+            const projectNumber = 1;      // número del ProjectV2 en la URL
 
             const query = `
               query($login: String!, $number: Int!) {
@@ -27,24 +27,23 @@ jobs:
                         ... on ProjectV2FieldCommon {
                           id
                           name
+                          dataType
                         }
                         ... on ProjectV2SingleSelectField {
-                          dataType
-                          options(first: 100) {
-                            nodes { id name }
+                          options {
+                            id
+                            name
                           }
                         }
-                        ... on ProjectV2TextField {
-                          dataType
-                        }
-                        ... on ProjectV2NumberField {
-                          dataType
-                        }
-                        ... on ProjectV2DateField {
-                          dataType
-                        }
                         ... on ProjectV2IterationField {
-                          dataType
+                          configuration {
+                            iterations {
+                              id
+                              title
+                              startDate
+                              duration
+                            }
+                          }
                         }
                       }
                     }
@@ -60,25 +59,29 @@ jobs:
 
             const proj = result.user?.projectV2;
             if (!proj) {
-              core.setFailed("No se encontró el proyecto. Verifica login/number y el scope del token (project read).");
+              core.setFailed("No se encontró el proyecto. Verifica login/number y el scope del token.");
               return;
             }
 
             console.log("📌 Project title:", proj.title);
             console.log("🆔 Project ID:", proj.id);
             console.log("📋 Campos:");
+            for (const f of proj.fields.nodes) {
+              const name = f.name ?? "(sin nombre)";
+              const id = f.id ?? "(sin id)";
+              const typeName = f.__typename ?? "(desconocido)";
+              const dt = f.dataType ?? "(n/a)";
+              console.log(`➡️  ${name} | ID: ${id} | __typename: ${typeName} | dataType: ${dt}`);
 
-            for (const field of proj.fields.nodes) {
-              const name = field.name ?? "(sin nombre)";
-              const id = field.id ?? "(sin id)";
-              const type = field.__typename ?? "(desconocido)";
-              const dt = field.dataType ?? "(n/a)";
-              console.log(`➡️  ${name} | ID: ${id} | __typename: ${type} | dataType: ${dt}`);
-
-              // Si es SingleSelect, lista opciones
-              if (type === "ProjectV2SingleSelectField" && field.options?.nodes?.length) {
-                for (const opt of field.options.nodes) {
+              if (typeName === "ProjectV2SingleSelectField" && Array.isArray(f.options)) {
+                for (const opt of f.options) {
                   console.log(`    - opción: ${opt.name} (${opt.id})`);
+                }
+              }
+
+              if (typeName === "ProjectV2IterationField" && f.configuration?.iterations?.length) {
+                for (const it of f.configuration.iterations) {
+                  console.log(`    - iteración: ${it.title} | inicio: ${it.startDate} | duración: ${it.duration}`);
                 }
               }
             }
