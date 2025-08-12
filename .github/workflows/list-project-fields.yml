@@ -1,4 +1,4 @@
-name: list project fields
+name: list project fields 
 
 on:
   pull_request:
@@ -31,8 +31,8 @@ jobs:
               return;
             }
 
-            // --- Query que sirve tanto para user como para organization ---
-            const query = `
+            // --- Query para obtener el proyecto y sus campos ---
+            const projectQuery = `
               query($login: String!, $number: Int!) {
                 u: user(login: $login) {
                   projectV2(number: $number) {
@@ -61,9 +61,29 @@ jobs:
               }
             `;
 
-            const res = await github.graphql(query, { login: ownerLogin, number: projectNumber });
-            const project = res.u?.projectV2 ?? res.o?.projectV2;
+            // --- Query para obtener datos del PR (autor, assignees, estado, fechas, descripción) ---
+            const prQuery = `
+              query($prId: ID!) {
+                node(id: $prId) {
+                  ... on PullRequest {
+                    title
+                    author { login }
+                    assignees(first: 10) {
+                      nodes { login }
+                    }
+                    state
+                    createdAt
+                    closedAt
+                    mergedAt
+                    body
+                  }
+                }
+              }
+            `;
 
+            // Obtener el Project V2 y sus campos
+            const res = await github.graphql(projectQuery, { login: ownerLogin, number: projectNumber });
+            const project = res.u?.projectV2 ?? res.o?.projectV2;
             if (!project) {
               core.setFailed(`No se encontró ProjectV2 ${ownerLogin} #${projectNumber} (verifica si es user u org y el token).`);
               return;
@@ -77,7 +97,6 @@ jobs:
               const typeName = f.__typename ?? "(desconocido)";
               const dt = f.dataType ?? "(n/a)";
               console.log(`  • ${name} | ID: ${id} | __typename: ${typeName} | dataType: ${dt}`);
-
               if (typeName === "ProjectV2SingleSelectField" && Array.isArray(f.options)) {
                 for (const opt of f.options) {
                   console.log(`      - opción: ${opt.name} (${opt.id})`);
@@ -85,7 +104,20 @@ jobs:
               }
             }
 
-            // --- Buscar el campo Single-Select "Status" y la opción "To do" ---
+            // Obtener datos del PR
+            const prData = await github.graphql(prQuery, { prId: prNodeId });
+            const pr = prData.node;
+
+            console.log("PR title:", pr.title);
+            console.log("Author:", pr.author?.login);
+            console.log("Assignees:", pr.assignees.nodes.map(a => a.login).join(", "));
+            console.log("Status:", pr.state);
+            console.log("Created at:", pr.createdAt);
+            console.log("Closed at:", pr.closedAt);
+            console.log("Merged at:", pr.mergedAt);
+            console.log("Description:", pr.body);
+
+            // Buscar el campo Single-Select "Status" y la opción "To do"
             const fields = project.fields.nodes ?? [];
             const statusField = fields.find(f => f.__typename === "ProjectV2SingleSelectField" && f.name === statusFieldName);
             if (!statusField) {
@@ -104,14 +136,14 @@ jobs:
             }
 
             // --- Agregar PR al Project ---
-            const addItem = `
+            const addItemMutation = `
               mutation($projectId: ID!, $contentId: ID!) {
                 addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
                   item { id }
                 }
               }
             `;
-            const addRes = await github.graphql(addItem, { projectId: project.id, contentId: prNodeId });
+            const addRes = await github.graphql(addItemMutation, { projectId: project.id, contentId: prNodeId });
             const itemId = addRes.addProjectV2ItemById?.item?.id;
             if (!itemId) {
               core.setFailed("No se pudo agregar/obtener el item del Project para este PR.");
@@ -121,7 +153,7 @@ jobs:
 
             // --- Actualizar campo Status si se pudo resolver opción ---
             if (statusField && statusOptionId) {
-              const updateField = `
+              const updateStatusMutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $projectId,
@@ -133,7 +165,7 @@ jobs:
                   }
                 }
               `;
-              await github.graphql(updateField, {
+              await github.graphql(updateStatusMutation, {
                 projectId: project.id,
                 itemId,
                 fieldId: statusField.id,
@@ -144,3 +176,69 @@ jobs:
               console.log("ℹ️  No se actualizó ningún campo (no encontrado u opción ausente).");
             }
 
+            // Funciones para actualizar campos de texto y fecha
+            async function updateTextField(field, text) {
+              if (!field) return;
+              const mutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId,
+                    itemId: $itemId,
+                    fieldId: $fieldId,
+                    value: { text: $text }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }
+              `;
+              await github.graphql(mutation, {
+                projectId: project.id,
+                itemId,
+                fieldId: field.id,
+                text
+              });
+            }
+
+            async function updateDateField(field, dateISO) {
+              if (!field) return;
+              const mutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: DateTime!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId,
+                    itemId: $itemId,
+                    fieldId: $fieldId,
+                    value: { date: $date }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }
+              `;
+              await github.graphql(mutation, {
+                projectId: project.id,
+                itemId,
+                fieldId: field.id,
+                date: dateISO
+              });
+            }
+
+            // Buscar campos adicionales para actualizar
+            const assigneesField = fields.find(f => f.name === "Assignees");
+            const dateField = fields.find(f => f.name === "Date");
+            const descriptionField = fields.find(f => f.name === "Description");
+
+            const assigneesText = pr.assignees.nodes.map(a => a.login).join(", ");
+
+            // Elegir fecha según estado
+            let dateToUse = pr.createdAt;
+            if (pr.state === "MERGED" && pr.mergedAt) {
+              dateToUse = pr.mergedAt;
+            } else if (pr.state === "CLOSED" && pr.closedAt) {
+              dateToUse = pr.closedAt;
+            }
+
+            // Actualizar campos adicionales
+            await updateTextField(descriptionField, pr.body || "");
+            await updateTextField(assigneesField, assigneesText);
+            await updateDateField(dateField, dateToUse);
+
+            console.log("✅ Campos adicionales actualizados: Description, Assignees, Date");
