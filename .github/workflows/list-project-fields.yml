@@ -222,7 +222,7 @@ jobs:
             }
 
             // Buscar campos adicionales para actualizar
-            const assigneesField = fields.find(f => f.name === "Assignees");
+            const assigneesField = fields.find(f => f.name === "Author PR");
             const dateField = fields.find(f => f.name === "Date");
             const descriptionField = fields.find(f => f.name === "Description");
 
