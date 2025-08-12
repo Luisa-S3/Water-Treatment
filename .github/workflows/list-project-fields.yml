@@ -2,7 +2,7 @@ name: list project fields
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, synchronize, labeled]
+    types: [opened, reopened, edited, ready_for_review, synchronize, labeled]
     branches:
       - main
 
@@ -15,145 +15,137 @@ jobs:
   upsert-pr-in-project:
     runs-on: ubuntu-latest
     steps:
-      - name: Add/Update PR in Project V2 and list fields
+      - name: Sync PR to Project V2
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PROJECT_TOKEN }}
           script: |
-            const ownerLogin = "Luisa-S3";    // usuario u organización dueña del Project
-            const projectNumber = 1;          // número del Project en la URL
-            const statusFieldName = "Status"; // nombre EXACTO del campo Single-Select
-            const targetStatus = "To do";     // opción EXACTA dentro de ese campo
 
-            const prNodeId = context.payload.pull_request?.node_id;
-            if (!prNodeId) {
-              core.setFailed("No se pudo obtener el node_id del PR desde el contexto del evento.");
+            const ownerLogin = "Luisa-S3";     // Usuario u organización dueña del Project V2
+            const projectNumber = 1;           // Número del Project en la URL (ej: https://github.com/orgs/Luisa-S3/projects/1)
+            const statusFieldName = "Status";  // Nombre exacto del campo single-select
+            const targetStatusMap = {
+              "open": "To do",
+              "closed": "Done",
+              "merged": "Merged"
+            };
+            const pr = context.payload.pull_request;
+
+            if (!pr) {
+              core.setFailed("Evento sin pull_request en el contexto");
               return;
             }
 
-            // --- Query para obtener el proyecto y sus campos ---
-            const projectQuery = `
+            // Obtener el estado para el campo Status
+            let prState = pr.state; // "open" o "closed"
+            if (pr.merged_at) prState = "merged";
+            const targetStatus = targetStatusMap[prState] || "To do";
+
+            // Query para obtener el proyecto y sus campos y items
+            const queryProject = `
               query($login: String!, $number: Int!) {
                 u: user(login: $login) {
                   projectV2(number: $number) {
-                    ...Proj
-                  }
-                }
-              }
-              fragment Proj on ProjectV2 {
-                id
-                title
-                fields(first: 100) {
-                  nodes {
-                    __typename
-                    ... on ProjectV2FieldCommon {
-                      id
-                      name
-                      dataType
-                    }
-                    ... on ProjectV2SingleSelectField {
-                      id
-                      name
-                      options { id name }
-                    }
-                  }
-                }
-              }
-            `;
-
-            // --- Query para obtener datos del PR (autor, assignees, estado, fechas, descripción) ---
-            const prQuery = `
-              query($prId: ID!) {
-                node(id: $prId) {
-                  ... on PullRequest {
+                    id
                     title
-                    author { login }
-                    assignees(first: 10) {
-                      nodes { login }
+                    fields(first: 100) {
+                      nodes {
+                        id
+                        name
+                        dataType
+                        __typename
+                        ... on ProjectV2SingleSelectField {
+                          options { id name }
+                        }
+                      }
                     }
-                    state
-                    createdAt
-                    closedAt
-                    mergedAt
-                    body
+                    items(first: 100) {
+                      nodes {
+                        id
+                        content {
+                          ... on PullRequest {
+                            id
+                            number
+                          }
+                        }
+                      }
+                    }
                   }
                 }
               }
             `;
 
-            // Obtener el Project V2 y sus campos
-            const res = await github.graphql(projectQuery, { login: ownerLogin, number: projectNumber });
-            const project = res.u?.projectV2 ?? res.o?.projectV2;
+            const res = await github.graphql(queryProject, { login: ownerLogin, number: projectNumber });
+            const project = res.u?.projectV2;
+
             if (!project) {
-              core.setFailed(`No se encontró ProjectV2 ${ownerLogin} #${projectNumber} (verifica si es user u org y el token).`);
+              core.setFailed(`No se encontró ProjectV2 ${ownerLogin} #${projectNumber}`);
               return;
             }
 
-            console.log(`📌 Project: ${project.title} (${project.id})`);
-            console.log("📋 Campos:");
-            for (const f of project.fields.nodes) {
-              const name = f.name ?? "(sin nombre)";
-              const id = f.id ?? "(sin id)";
-              const typeName = f.__typename ?? "(desconocido)";
-              const dt = f.dataType ?? "(n/a)";
-              console.log(`  • ${name} | ID: ${id} | __typename: ${typeName} | dataType: ${dt}`);
-              if (typeName === "ProjectV2SingleSelectField" && Array.isArray(f.options)) {
-                for (const opt of f.options) {
-                  console.log(`      - opción: ${opt.name} (${opt.id})`);
-                }
-              }
-            }
+            // Buscar campos específicos por nombre
+            const fields = project.fields.nodes;
 
-            // Obtener datos del PR
-            const prData = await github.graphql(prQuery, { prId: prNodeId });
-            const pr = prData.node;
+            const statusField = fields.find(f => f.name === statusFieldName && f.__typename === "ProjectV2SingleSelectField");
+            const prIdField = fields.find(f => f.name === "PR ID");
+            const authorField = fields.find(f => f.name === "Author PR");
+            const dateField = fields.find(f => f.name === "Date");
+            const descriptionField = fields.find(f => f.name === "Description");
 
-            console.log("PR title:", pr.title);
-            console.log("Author:", pr.author?.login);
-            console.log("Assignees:", pr.assignees.nodes.map(a => a.login).join(", "));
-            console.log("Status:", pr.state);
-            console.log("Created at:", pr.createdAt);
-            console.log("Closed at:", pr.closedAt);
-            console.log("Merged at:", pr.mergedAt);
-            console.log("Description:", pr.body);
-
-            // Buscar el campo Single-Select "Status" y la opción "To do"
-            const fields = project.fields.nodes ?? [];
-            const statusField = fields.find(f => f.__typename === "ProjectV2SingleSelectField" && f.name === statusFieldName);
             if (!statusField) {
-              console.log(`⚠️  No se encontró el campo Single-Select "${statusFieldName}". Se agregará el PR sin actualizar campo.`);
+              core.warning(`No se encontró el campo Single-Select "${statusFieldName}".`);
+            }
+            if (!prIdField) {
+              core.warning('No se encontró el campo "PR ID".');
+            }
+            if (!authorField) {
+              core.warning('No se encontró el campo "Author PR".');
+            }
+            if (!dateField) {
+              core.warning('No se encontró el campo "Date".');
+            }
+            if (!descriptionField) {
+              core.warning('No se encontró el campo "Description".');
             }
 
+            // Encontrar opción del status que corresponde
             let statusOptionId = null;
-            if (statusField?.options?.length) {
-              const opt = statusField.options.find(o => o.name === targetStatus);
-              if (!opt) {
-                console.log(`⚠️  No existe la opción "${targetStatus}" en "${statusFieldName}".`);
+            if (statusField?.options) {
+              const option = statusField.options.find(o => o.name === targetStatus);
+              if (option) {
+                statusOptionId = option.id;
               } else {
-                statusOptionId = opt.id;
-                console.log(`✅ Opción objetivo: ${targetStatus} (${statusOptionId})`);
+                core.warning(`No existe opción "${targetStatus}" en campo Status.`);
               }
             }
 
-            // --- Agregar PR al Project ---
-            const addItemMutation = `
-              mutation($projectId: ID!, $contentId: ID!) {
-                addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
-                  item { id }
-                }
-              }
-            `;
-            const addRes = await github.graphql(addItemMutation, { projectId: project.id, contentId: prNodeId });
-            const itemId = addRes.addProjectV2ItemById?.item?.id;
+            // Buscar si ya existe item para este PR (por content.id = pr.node_id)
+            const existingItem = project.items.nodes.find(item => item.content?.id === pr.node_id);
+
+            let itemId = existingItem?.id;
+
+            // Si no existe, agregarlo
             if (!itemId) {
-              core.setFailed("No se pudo agregar/obtener el item del Project para este PR.");
-              return;
+              const addMutation = `
+                mutation($projectId: ID!, $contentId: ID!) {
+                  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+                    item { id }
+                  }
+                }
+              `;
+              const addRes = await github.graphql(addMutation, { projectId: project.id, contentId: pr.node_id });
+              itemId = addRes.addProjectV2ItemById?.item?.id;
+              if (!itemId) {
+                core.setFailed("No se pudo agregar el PR al proyecto.");
+                return;
+              }
             }
-            console.log(`🆔 Item en Project: ${itemId}`);
 
-            // --- Actualizar campo Status si se pudo resolver opción ---
-            if (statusField && statusOptionId) {
-              const updateStatusMutation = `
+            // Funciones para actualizar campos
+
+            async function updateSingleSelectField(field, optionId) {
+              if (!field || !optionId) return;
+              const mutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $projectId,
@@ -165,18 +157,14 @@ jobs:
                   }
                 }
               `;
-              await github.graphql(updateStatusMutation, {
+              await github.graphql(mutation, {
                 projectId: project.id,
                 itemId,
-                fieldId: statusField.id,
-                optionId: statusOptionId
+                fieldId: field.id,
+                optionId
               });
-              console.log(`✅ Campo "${statusFieldName}" actualizado a "${targetStatus}".`);
-            } else {
-              console.log("ℹ️  No se actualizó ningún campo (no encontrado u opción ausente).");
             }
 
-            // Funciones para actualizar campos de texto y fecha
             async function updateTextField(field, text) {
               if (!field) return;
               const mutation = `
@@ -195,50 +183,58 @@ jobs:
                 projectId: project.id,
                 itemId,
                 fieldId: field.id,
-                text
+                text: text || ""
               });
             }
 
             async function updateDateField(field, dateISO) {
-              if (!field) return;
+              if (!field || !dateISO) return;
+
+              const dateOnly = dateISO.substring(0, 10);
+
               const mutation = `
-                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: Date!) {
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $dateValue: Date!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $projectId,
                     itemId: $itemId,
                     fieldId: $fieldId,
-                    value: { date: $date }
+                    value: { date: $dateValue }
                   }) {
                     projectV2Item { id }
                   }
                 }
               `;
+
               await github.graphql(mutation, {
                 projectId: project.id,
                 itemId,
                 fieldId: field.id,
-                date: dateISO
+                dateValue: dateOnly
               });
             }
 
-            // Buscar campos adicionales para actualizar
-            const assigneesField = fields.find(f => f.name === "Author PR");
-            const dateField = fields.find(f => f.name === "Date");
-            const descriptionField = fields.find(f => f.name === "Description");
+            // Actualizar campos
 
-            const assigneesText = pr.assignees.nodes.map(a => a.login).join(", ");
-
-            // Elegir fecha según estado
-            let dateToUse = pr.createdAt;
-            if (pr.state === "MERGED" && pr.mergedAt) {
-              dateToUse = pr.mergedAt;
-            } else if (pr.state === "CLOSED" && pr.closedAt) {
-              dateToUse = pr.closedAt;
+            if (statusField && statusOptionId) {
+              await updateSingleSelectField(statusField, statusOptionId);
             }
 
-            // Actualizar campos adicionales
-            await updateTextField(descriptionField, pr.body || "");
-            await updateTextField(assigneesField, assigneesText);
-            await updateDateField(dateField, dateToUse);
+            if (prIdField) {
+              await updateTextField(prIdField, pr.number.toString());
+            }
 
-            console.log("✅ Campos adicionales actualizados: Description, Assignees, Date");
+            if (authorField) {
+              await updateTextField(authorField, pr.author?.login || "");
+            }
+
+            if (dateField) {
+              // pr.updated_at o pr.created_at ? Puedes usar updated_at para reflejar cambios
+              await updateDateField(dateField, pr.updated_at || pr.created_at);
+            }
+
+            if (descriptionField) {
+              await updateTextField(descriptionField, pr.body || "");
+            }
+
+            console.log(`✅ PR #${pr.number} sincronizado en Project "${project.title}" (item ${itemId})`);
+
