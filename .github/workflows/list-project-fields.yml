@@ -2,89 +2,150 @@ name: list project fields
 
 on:
   pull_request:
-    types: [opened, reopened, edited, ready_for_review, closed]
+    types: [opened, reopened, ready_for_review, synchronize, labeled]
     branches:
-      - main  # ejecuta solo si el PR va dirigido a main
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+  repository-projects: write
 
 jobs:
-  list-fields:
+  upsert-pr-in-project:
     runs-on: ubuntu-latest
     steps:
-      - name: List fields in user project
+      - name: Add/Update PR in Project V2 and list fields
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PROJECT_TOKEN }}
           script: |
-            const username = "Luisa-S3"; // cámbialo si aplica
-            const projectNumber = 1;      // número del ProjectV2 en la URL
+            const ownerLogin = "Luisa-S3";    // usuario u organización dueña del Project
+            const projectNumber = 1;          // número del Project en la URL
+            const statusFieldName = "Status"; // nombre EXACTO del campo Single-Select
+            const targetStatus = "To do";     // opción EXACTA dentro de ese campo
 
+            const prNodeId = context.payload.pull_request?.node_id;
+            if (!prNodeId) {
+              core.setFailed("No se pudo obtener el node_id del PR desde el contexto del evento.");
+              return;
+            }
+
+            // --- Query que sirve tanto para user como para organization ---
             const query = `
               query($login: String!, $number: Int!) {
-                user(login: $login) {
+                u: user(login: $login) {
                   projectV2(number: $number) {
-                    id
-                    title
-                    fields(first: 50) {
-                      nodes {
-                        __typename
-                        ... on ProjectV2FieldCommon {
-                          id
-                          name
-                          dataType
-                        }
-                        ... on ProjectV2SingleSelectField {
-                          options {
-                            id
-                            name
-                          }
-                        }
-                        ... on ProjectV2IterationField {
-                          configuration {
-                            iterations {
-                              id
-                              title
-                              startDate
-                              duration
-                            }
-                          }
-                        }
-                      }
+                    ...Proj
+                  }
+                }
+                o: organization(login: $login) {
+                  projectV2(number: $number) {
+                    ...Proj
+                  }
+                }
+              }
+              fragment Proj on ProjectV2 {
+                id
+                title
+                fields(first: 100) {
+                  nodes {
+                    __typename
+                    ... on ProjectV2FieldCommon {
+                      id
+                      name
+                      dataType
+                    }
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      name
+                      options { id name }
                     }
                   }
                 }
               }
             `;
 
-            const result = await github.graphql(query, {
-              login: username,
-              number: projectNumber
-            });
+            const res = await github.graphql(query, { login: ownerLogin, number: projectNumber });
+            const project = res.u?.projectV2 ?? res.o?.projectV2;
 
-            const proj = result.user?.projectV2;
-            if (!proj) {
-              core.setFailed("No se encontró el proyecto. Verifica login/number y el scope del token.");
+            if (!project) {
+              core.setFailed(`No se encontró ProjectV2 ${ownerLogin} #${projectNumber} (verifica si es user u org y el token).`);
               return;
             }
 
-            console.log("📌 Project title:", proj.title);
-            console.log("🆔 Project ID:", proj.id);
+            console.log(`📌 Project: ${project.title} (${project.id})`);
             console.log("📋 Campos:");
-            for (const f of proj.fields.nodes) {
+            for (const f of project.fields.nodes) {
               const name = f.name ?? "(sin nombre)";
               const id = f.id ?? "(sin id)";
               const typeName = f.__typename ?? "(desconocido)";
               const dt = f.dataType ?? "(n/a)";
-              console.log(`➡️  ${name} | ID: ${id} | __typename: ${typeName} | dataType: ${dt}`);
+              console.log(`  • ${name} | ID: ${id} | __typename: ${typeName} | dataType: ${dt}`);
 
               if (typeName === "ProjectV2SingleSelectField" && Array.isArray(f.options)) {
                 for (const opt of f.options) {
-                  console.log(`    - opción: ${opt.name} (${opt.id})`);
-                }
-              }
-
-              if (typeName === "ProjectV2IterationField" && f.configuration?.iterations?.length) {
-                for (const it of f.configuration.iterations) {
-                  console.log(`    - iteración: ${it.title} | inicio: ${it.startDate} | duración: ${it.duration}`);
+                  console.log(`      - opción: ${opt.name} (${opt.id})`);
                 }
               }
             }
+
+            // --- Buscar el campo Single-Select "Status" y la opción "To do" ---
+            const fields = project.fields.nodes ?? [];
+            const statusField = fields.find(f => f.__typename === "ProjectV2SingleSelectField" && f.name === statusFieldName);
+            if (!statusField) {
+              console.log(`⚠️  No se encontró el campo Single-Select "${statusFieldName}". Se agregará el PR sin actualizar campo.`);
+            }
+
+            let statusOptionId = null;
+            if (statusField?.options?.length) {
+              const opt = statusField.options.find(o => o.name === targetStatus);
+              if (!opt) {
+                console.log(`⚠️  No existe la opción "${targetStatus}" en "${statusFieldName}".`);
+              } else {
+                statusOptionId = opt.id;
+                console.log(`✅ Opción objetivo: ${targetStatus} (${statusOptionId})`);
+              }
+            }
+
+            // --- Agregar PR al Project ---
+            const addItem = `
+              mutation($projectId: ID!, $contentId: ID!) {
+                addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+                  item { id }
+                }
+              }
+            `;
+            const addRes = await github.graphql(addItem, { projectId: project.id, contentId: prNodeId });
+            const itemId = addRes.addProjectV2ItemById?.item?.id;
+            if (!itemId) {
+              core.setFailed("No se pudo agregar/obtener el item del Project para este PR.");
+              return;
+            }
+            console.log(`🆔 Item en Project: ${itemId}`);
+
+            // --- Actualizar campo Status si se pudo resolver opción ---
+            if (statusField && statusOptionId) {
+              const updateField = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId,
+                    itemId: $itemId,
+                    fieldId: $fieldId,
+                    value: { singleSelectOptionId: $optionId }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }
+              `;
+              await github.graphql(updateField, {
+                projectId: project.id,
+                itemId,
+                fieldId: statusField.id,
+                optionId: statusOptionId
+              });
+              console.log(`✅ Campo "${statusFieldName}" actualizado a "${targetStatus}".`);
+            } else {
+              console.log("ℹ️  No se actualizó ningún campo (no encontrado u opción ausente).");
+            }
+
