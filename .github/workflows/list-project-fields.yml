@@ -34,7 +34,7 @@ jobs:
             // --- Query que sirve tanto para user como para organization ---
             const query = `
               query($login: String!, $number: Int!) {
-                u: user(login: $login) {
+                u: repositoryOwner(login: $login) {
                   projectV2(number: $number) {
                     ...Proj
                   }
