@@ -39,11 +39,6 @@ jobs:
                     ...Proj
                   }
                 }
-                o: organization(login: $login) {
-                  projectV2(number: $number) {
-                    ...Proj
-                  }
-                }
               }
               fragment Proj on ProjectV2 {
                 id
