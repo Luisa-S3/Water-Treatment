@@ -1,7 +1,10 @@
 name: list project fields
 
 on:
-  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, edited, ready_for_review, closed]
+    branches:
+      - main  # ejecuta solo si el PR va dirigido a main
 
 jobs:
   list-fields:
