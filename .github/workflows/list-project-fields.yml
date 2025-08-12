@@ -202,7 +202,7 @@ jobs:
             async function updateDateField(field, dateISO) {
               if (!field) return;
               const mutation = `
-                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: DateTime!) {
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: Date!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $projectId,
                     itemId: $itemId,
