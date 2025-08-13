@@ -20,8 +20,10 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PROJECT_TOKEN }}
           script: |
-            const ownerLogin = "Luisa-S3";   // Cambia aquí si es organización o usuario
+            const ownerLogin = "Luisa-S3";   // Cambia por tu usuario u organización
             const projectNumber = 1;
+
+            // Nombres exactos de los campos personalizados en tu Project V2
             const statusFieldName = "Status";
             const prIdFieldName = "PR ID";
             const authorFieldName = "Author PR";
@@ -30,18 +32,18 @@ jobs:
 
             const pr = context.payload.pull_request;
             if (!pr) {
-              core.setFailed("No pull request found in event context.");
+              core.setFailed("No se encontró pull_request en el contexto.");
               return;
             }
 
-            // Determinar estado para el campo status
+            // Mapear estado del PR a opciones del campo Status
             const statusMap = {
               open: "To do",
               closed: pr.merged_at ? "Merged" : "Done",
             };
             const targetStatus = statusMap[pr.state] || "To do";
 
-            // Query para obtener proyecto, campos y items (user y org)
+            // Query GraphQL corregido para evitar error en content union
             const query = `
               query($login: String!, $number: Int!) {
                 u: user(login: $login) {
@@ -103,12 +105,12 @@ jobs:
               }
             `;
 
-            // Ejecutar query
+            // Ejecutar query para obtener proyecto, campos y items
             const res = await github.graphql(query, { login: ownerLogin, number: projectNumber });
             const project = res.u?.projectV2 ?? res.o?.projectV2;
 
             if (!project) {
-              core.setFailed(`ProjectV2 not found for login ${ownerLogin} number ${projectNumber}`);
+              core.setFailed(`No se encontró ProjectV2 para ${ownerLogin} #${projectNumber}`);
               return;
             }
 
@@ -121,24 +123,24 @@ jobs:
             const dateField = fields.find(f => f.name === dateFieldName);
             const descriptionField = fields.find(f => f.name === descriptionFieldName);
 
-            // Encontrar opción correcta para Status
+            // Obtener id opción status correspondiente
             let statusOptionId = null;
             if (statusField?.options) {
               const option = statusField.options.find(o => o.name === targetStatus);
               if (option) statusOptionId = option.id;
-              else core.warning(`Status option "${targetStatus}" not found in field "${statusFieldName}"`);
+              else core.warning(`No existe opción "${targetStatus}" en campo "${statusFieldName}"`);
             }
 
-            // Buscar si ya existe item para este PR
+            // Buscar item existente para este PR (por content.id)
             const existingItem = project.items.nodes.find(item => item.content?.id === pr.node_id);
 
             let itemId = existingItem?.id;
 
-            // Si no existe, crear item nuevo
+            // Si no existe item, agregar nuevo
             if (!itemId) {
               const addMutation = `
                 mutation($projectId: ID!, $contentId: ID!) {
-                  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+                  addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
                     item { id }
                   }
                 }
@@ -146,13 +148,12 @@ jobs:
               const addRes = await github.graphql(addMutation, { projectId: project.id, contentId: pr.node_id });
               itemId = addRes.addProjectV2ItemById?.item?.id;
               if (!itemId) {
-                core.setFailed("Failed to add PR to ProjectV2");
+                core.setFailed("No se pudo agregar el PR al ProjectV2.");
                 return;
               }
             }
 
-            // Funciones para actualizar campos
-
+            // Funciones para actualizar campos en el item
             async function updateSingleSelect(field, optionId) {
               if (!field || !optionId) return;
               const mutation = `
@@ -189,7 +190,7 @@ jobs:
 
             async function updateDate(field, dateISO) {
               if (!field || !dateISO) return;
-              const dateOnly = dateISO.substring(0, 10); // YYYY-MM-DD
+              const dateOnly = dateISO.substring(0, 10);
               const mutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $dateValue: Date!) {
                   updateProjectV2ItemFieldValue(input: {
@@ -205,11 +206,12 @@ jobs:
               await github.graphql(mutation, { projectId: project.id, itemId, fieldId: field.id, dateValue: dateOnly });
             }
 
-            // Actualizar campos
+            // Actualizar los campos con los datos del PR
             if (statusField && statusOptionId) await updateSingleSelect(statusField, statusOptionId);
             if (prIdField) await updateText(prIdField, pr.number.toString());
             if (authorField) await updateText(authorField, pr.author?.login || "");
             if (dateField) await updateDate(dateField, pr.updated_at || pr.created_at);
             if (descriptionField) await updateText(descriptionField, pr.body || "");
 
-            console.log(`✅ PR #${pr.number} synced to project "${project.title}", item ${itemId}`);
+            console.log(`✅ PR #${pr.number} sincronizado en Project "${project.title}", item ${itemId}`);
+
