@@ -20,31 +20,59 @@ jobs:
         with:
           github-token: ${{ secrets.GH_PROJECT_TOKEN }}
           script: |
+            const ownerLogin = "Luisa-S3";   // Cambia aquí si es organización o usuario
+            const projectNumber = 1;
+            const statusFieldName = "Status";
+            const prIdFieldName = "PR ID";
+            const authorFieldName = "Author PR";
+            const dateFieldName = "Date";
+            const descriptionFieldName = "Description";
 
-            const ownerLogin = "Luisa-S3";     // Usuario u organización dueña del Project V2
-            const projectNumber = 1;           // Número del Project en la URL (ej: https://github.com/orgs/Luisa-S3/projects/1)
-            const statusFieldName = "Status";  // Nombre exacto del campo single-select
-            const targetStatusMap = {
-              "open": "To do",
-              "closed": "Done",
-              "merged": "Merged"
-            };
             const pr = context.payload.pull_request;
-
             if (!pr) {
-              core.setFailed("Evento sin pull_request en el contexto");
+              core.setFailed("No pull request found in event context.");
               return;
             }
 
-            // Obtener el estado para el campo Status
-            let prState = pr.state; // "open" o "closed"
-            if (pr.merged_at) prState = "merged";
-            const targetStatus = targetStatusMap[prState] || "To do";
+            // Determinar estado para el campo status
+            const statusMap = {
+              open: "To do",
+              closed: pr.merged_at ? "Merged" : "Done",
+            };
+            const targetStatus = statusMap[pr.state] || "To do";
 
-            // Query para obtener el proyecto y sus campos y items
-            const queryProject = `
+            // Query para obtener proyecto, campos y items (user y org)
+            const query = `
               query($login: String!, $number: Int!) {
                 u: user(login: $login) {
+                  projectV2(number: $number) {
+                    id
+                    title
+                    fields(first: 100) {
+                      nodes {
+                        id
+                        name
+                        dataType
+                        __typename
+                        ... on ProjectV2SingleSelectField {
+                          options { id name }
+                        }
+                      }
+                    }
+                    items(first: 100) {
+                      nodes {
+                        id
+                        content {
+                          ... on PullRequest {
+                            id
+                            number
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                o: organization(login: $login) {
                   projectV2(number: $number) {
                     id
                     title
@@ -75,56 +103,38 @@ jobs:
               }
             `;
 
-            const res = await github.graphql(queryProject, { login: ownerLogin, number: projectNumber });
-            const project = res.u?.projectV2;
+            // Ejecutar query
+            const res = await github.graphql(query, { login: ownerLogin, number: projectNumber });
+            const project = res.u?.projectV2 ?? res.o?.projectV2;
 
             if (!project) {
-              core.setFailed(`No se encontró ProjectV2 ${ownerLogin} #${projectNumber}`);
+              core.setFailed(`ProjectV2 not found for login ${ownerLogin} number ${projectNumber}`);
               return;
             }
 
-            // Buscar campos específicos por nombre
             const fields = project.fields.nodes;
 
+            // Buscar campos por nombre
             const statusField = fields.find(f => f.name === statusFieldName && f.__typename === "ProjectV2SingleSelectField");
-            const prIdField = fields.find(f => f.name === "PR ID");
-            const authorField = fields.find(f => f.name === "Author PR");
-            const dateField = fields.find(f => f.name === "Date");
-            const descriptionField = fields.find(f => f.name === "Description");
+            const prIdField = fields.find(f => f.name === prIdFieldName);
+            const authorField = fields.find(f => f.name === authorFieldName);
+            const dateField = fields.find(f => f.name === dateFieldName);
+            const descriptionField = fields.find(f => f.name === descriptionFieldName);
 
-            if (!statusField) {
-              core.warning(`No se encontró el campo Single-Select "${statusFieldName}".`);
-            }
-            if (!prIdField) {
-              core.warning('No se encontró el campo "PR ID".');
-            }
-            if (!authorField) {
-              core.warning('No se encontró el campo "Author PR".');
-            }
-            if (!dateField) {
-              core.warning('No se encontró el campo "Date".');
-            }
-            if (!descriptionField) {
-              core.warning('No se encontró el campo "Description".');
-            }
-
-            // Encontrar opción del status que corresponde
+            // Encontrar opción correcta para Status
             let statusOptionId = null;
             if (statusField?.options) {
               const option = statusField.options.find(o => o.name === targetStatus);
-              if (option) {
-                statusOptionId = option.id;
-              } else {
-                core.warning(`No existe opción "${targetStatus}" en campo Status.`);
-              }
+              if (option) statusOptionId = option.id;
+              else core.warning(`Status option "${targetStatus}" not found in field "${statusFieldName}"`);
             }
 
-            // Buscar si ya existe item para este PR (por content.id = pr.node_id)
+            // Buscar si ya existe item para este PR
             const existingItem = project.items.nodes.find(item => item.content?.id === pr.node_id);
 
             let itemId = existingItem?.id;
 
-            // Si no existe, agregarlo
+            // Si no existe, crear item nuevo
             if (!itemId) {
               const addMutation = `
                 mutation($projectId: ID!, $contentId: ID!) {
@@ -136,14 +146,14 @@ jobs:
               const addRes = await github.graphql(addMutation, { projectId: project.id, contentId: pr.node_id });
               itemId = addRes.addProjectV2ItemById?.item?.id;
               if (!itemId) {
-                core.setFailed("No se pudo agregar el PR al proyecto.");
+                core.setFailed("Failed to add PR to ProjectV2");
                 return;
               }
             }
 
             // Funciones para actualizar campos
 
-            async function updateSingleSelectField(field, optionId) {
+            async function updateSingleSelect(field, optionId) {
               if (!field || !optionId) return;
               const mutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
@@ -157,15 +167,10 @@ jobs:
                   }
                 }
               `;
-              await github.graphql(mutation, {
-                projectId: project.id,
-                itemId,
-                fieldId: field.id,
-                optionId
-              });
+              await github.graphql(mutation, { projectId: project.id, itemId, fieldId: field.id, optionId });
             }
 
-            async function updateTextField(field, text) {
+            async function updateText(field, text) {
               if (!field) return;
               const mutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
@@ -179,19 +184,12 @@ jobs:
                   }
                 }
               `;
-              await github.graphql(mutation, {
-                projectId: project.id,
-                itemId,
-                fieldId: field.id,
-                text: text || ""
-              });
+              await github.graphql(mutation, { projectId: project.id, itemId, fieldId: field.id, text: text || "" });
             }
 
-            async function updateDateField(field, dateISO) {
+            async function updateDate(field, dateISO) {
               if (!field || !dateISO) return;
-
-              const dateOnly = dateISO.substring(0, 10);
-
+              const dateOnly = dateISO.substring(0, 10); // YYYY-MM-DD
               const mutation = `
                 mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $dateValue: Date!) {
                   updateProjectV2ItemFieldValue(input: {
@@ -204,37 +202,14 @@ jobs:
                   }
                 }
               `;
-
-              await github.graphql(mutation, {
-                projectId: project.id,
-                itemId,
-                fieldId: field.id,
-                dateValue: dateOnly
-              });
+              await github.graphql(mutation, { projectId: project.id, itemId, fieldId: field.id, dateValue: dateOnly });
             }
 
             // Actualizar campos
+            if (statusField && statusOptionId) await updateSingleSelect(statusField, statusOptionId);
+            if (prIdField) await updateText(prIdField, pr.number.toString());
+            if (authorField) await updateText(authorField, pr.author?.login || "");
+            if (dateField) await updateDate(dateField, pr.updated_at || pr.created_at);
+            if (descriptionField) await updateText(descriptionField, pr.body || "");
 
-            if (statusField && statusOptionId) {
-              await updateSingleSelectField(statusField, statusOptionId);
-            }
-
-            if (prIdField) {
-              await updateTextField(prIdField, pr.number.toString());
-            }
-
-            if (authorField) {
-              await updateTextField(authorField, pr.author?.login || "");
-            }
-
-            if (dateField) {
-              // pr.updated_at o pr.created_at ? Puedes usar updated_at para reflejar cambios
-              await updateDateField(dateField, pr.updated_at || pr.created_at);
-            }
-
-            if (descriptionField) {
-              await updateTextField(descriptionField, pr.body || "");
-            }
-
-            console.log(`✅ PR #${pr.number} sincronizado en Project "${project.title}" (item ${itemId})`);
-
+            console.log(`✅ PR #${pr.number} synced to project "${project.title}", item ${itemId}`);
